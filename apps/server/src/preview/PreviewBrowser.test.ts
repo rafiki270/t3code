@@ -12,6 +12,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import * as NodeZlib from "node:zlib";
 
@@ -20,9 +21,8 @@ import * as PreviewBrowser from "./PreviewBrowser.ts";
 // NTFS cannot enforce POSIX modes; choose the host platform.
 const hostPlatform: NodeJS.Platform =
   HostProcess.Platform.defaultValue() === "win32" ? "win32" : "linux";
-const executableName =
-  hostPlatform === "win32" ? "chrome-headless-shell.exe" : "chrome-headless-shell";
-const ROOT = "chrome-headless-shell-fixture/";
+const executableName = hostPlatform === "win32" ? "chrome.exe" : "chrome";
+const ROOT = "chrome-fixture/";
 
 const makeZip = (
   entries: ReadonlyArray<{ readonly name: string; readonly data?: string; readonly mode: number }>,
@@ -75,6 +75,7 @@ const browserArchive = makeZip([
 
 const makeHarness = Effect.fn("test.makePreviewBrowser")(function* (
   options: {
+    readonly platform?: NodeJS.Platform;
     readonly version?: string;
     readonly archive?: Buffer;
     readonly sha256?: string;
@@ -98,13 +99,13 @@ const makeHarness = Effect.fn("test.makePreviewBrowser")(function* (
       : {
           version: options.version ?? "1.2.3",
           platform: "fixture",
-          url: "https://storage.googleapis.com/chrome-headless-shell-fixture.zip",
+          url: "https://storage.googleapis.com/chrome-fixture.zip",
           bytes: archive.byteLength,
           sha256,
         },
     ...(options.wait === undefined ? {} : { wait: options.wait }),
   }).pipe(
-    Effect.provideService(HostProcess.Platform, hostPlatform),
+    Effect.provideService(HostProcess.Platform, options.platform ?? hostPlatform),
     Effect.provideService(HostProcess.Architecture, "x64"),
     Effect.provideService(
       HttpClient.HttpClient,
@@ -119,13 +120,14 @@ const makeHarness = Effect.fn("test.makePreviewBrowser")(function* (
       ),
     ),
   );
-  const installRoot = path.join(baseDir, "tools", "chrome-headless-shell", "fixture");
+  const installRoot = path.join(baseDir, "tools", "chrome", "fixture");
   return { browser, fs, path, baseDir, installRoot, requests };
 });
 
 it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("PreviewBrowser", (it) => {
   it.effect.each(["0.8.0", "1.2.3"])("retains another version when installing %s", (current) =>
     Effect.gen(function* () {
+      yield* TestClock.setTime(DateTime.toEpochMillis(DateTime.makeUnsafe("2026-01-01T00:00:00Z")));
       const { browser, fs, path, installRoot, requests } = yield* makeHarness({ version: current });
       yield* fs.makeDirectory(path.join(installRoot, "0.9.0"), { recursive: true });
       yield* fs.makeDirectory(path.join(installRoot, "0.10.0"));
@@ -179,16 +181,91 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("PreviewBrowser",
     }),
   );
 
-  it.effect.each([
-    { name: "a parent-directory entry", entry: `${ROOT}../escape` },
-    { name: "an absolute entry", entry: "/escape" },
-    { name: "an entry outside the top directory", entry: "escape" },
-  ])("rejects an archive with $name", (testCase) =>
+  it.effect("preserves the macOS app executable and framework symlink chain", () =>
+    Effect.gen(function* () {
+      const app = "Google Chrome for Testing.app/Contents";
+      const framework = `${app}/Frameworks/Chrome.framework`;
+      const { browser, fs, path } = yield* makeHarness({
+        platform: "darwin",
+        archive: makeZip([
+          {
+            name: `${ROOT}${app}/MacOS/Google Chrome for Testing`,
+            data: "browser",
+            mode: 0o100755,
+          },
+          {
+            name: `${ROOT}${framework}/Versions/157/Resources/en-US.pak`,
+            data: "signed resource",
+            mode: 0o100644,
+          },
+          { name: `${ROOT}${framework}/Versions/Current`, data: "157", mode: 0o120777 },
+          {
+            name: `${ROOT}${framework}/Resources`,
+            data: "Versions/Current/Resources",
+            mode: 0o120777,
+          },
+        ]),
+      });
+      const executable = yield* browser.executable;
+      const contents = path.dirname(path.dirname(executable));
+      expect(executable.endsWith(path.join("MacOS", "Google Chrome for Testing"))).toBe(true);
+      expect(
+        yield* fs.readFileString(
+          path.join(contents, "Frameworks", "Chrome.framework", "Resources", "en-US.pak"),
+        ),
+      ).toBe("signed resource");
+      expect(
+        yield* fs.readLink(
+          path.join(contents, "Frameworks", "Chrome.framework", "Versions", "Current"),
+        ),
+      ).toBe("157");
+    }),
+  );
+  it.effect.each(
+    [
+      { name: "a parent-directory entry", entry: `${ROOT}../escape` },
+      { name: "an absolute entry", entry: "/escape" },
+      { name: "an entry outside the top directory", entry: "escape" },
+      {
+        name: "an absolute app symlink",
+        entry: `${ROOT}link`,
+        platform: "darwin" as const,
+        data: "/escape",
+        mode: 0o120777,
+      },
+      {
+        name: "a parent-traversing app symlink",
+        entry: `${ROOT}link`,
+        platform: "darwin" as const,
+        data: "../escape",
+        mode: 0o120777,
+      },
+      {
+        name: "a dangling app symlink",
+        entry: `${ROOT}link`,
+        platform: "darwin" as const,
+        data: "missing",
+        mode: 0o120777,
+      },
+      {
+        name: "a cyclic app symlink",
+        entry: `${ROOT}link`,
+        platform: "darwin" as const,
+        data: "link",
+        mode: 0o120777,
+      },
+    ].map((testCase) => ({ platform: hostPlatform, data: "escaped", mode: 0o100644, ...testCase })),
+  )("rejects an archive with $name", (testCase) =>
     Effect.gen(function* () {
       const { browser, fs, path, baseDir, installRoot } = yield* makeHarness({
+        platform: testCase.platform,
         archive: makeZip([
-          { name: `${ROOT}${executableName}`, data: "#!/bin/sh\n", mode: 0o100755 },
-          { name: testCase.entry, data: "escaped", mode: 0o100644 },
+          {
+            name: `${ROOT}${testCase.platform === "darwin" ? "Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing" : executableName}`,
+            data: "#!/bin/sh\n",
+            mode: 0o100755,
+          },
+          { name: testCase.entry, data: testCase.data, mode: testCase.mode },
         ]),
       });
 
@@ -196,9 +273,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("PreviewBrowser",
 
       expect(error._tag).toBe("PreviewBrowserInstallError");
       expect(yield* fs.readDirectory(installRoot)).toEqual([]);
-      expect(yield* fs.exists(path.join(baseDir, "tools", "chrome-headless-shell", "escape"))).toBe(
-        false,
-      );
+      expect(yield* fs.exists(path.join(baseDir, "tools", "chrome", "escape"))).toBe(false);
     }),
   );
 });
