@@ -14,23 +14,27 @@ export const sandboxDisabled = (env: Readonly<Record<string, string | undefined>
 
 /** Set on Ubuntu 23.10+: unprivileged user namespaces need an AppArmor profile. */
 const USERNS_RESTRICTION = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns";
-export const APPARMOR_PROFILE_PATH = "/etc/apparmor.d/t3-chrome-headless-shell";
+export const APPARMOR_PROFILE_PATH = "/etc/apparmor.d/t3-chrome";
 
 /** Match Ubuntu's Chrome profile; unconfined adds nothing beyond userns. */
 export const APPARMOR_PROFILE = `# Written by \`t3 browser setup\`: lets T3 Code's headless browser use Chrome's sandbox.
 abi <abi/4.0>,
 include <tunables/global>
 
-profile t3-chrome-headless-shell /**/tools/chrome-headless-shell/*/*/chrome-headless-shell flags=(unconfined) {
+profile t3-chrome /**/tools/chrome/*/*/chrome flags=(unconfined) {
   userns,
 
-  include if exists <local/t3-chrome-headless-shell>
+  include if exists <local/t3-chrome>
 }
 `;
 
 /** Ubuntu 24.04 and Debian 13 use some t64 library names; choose names available through apt. */
 export const DEBIAN_PACKAGES: ReadonlyArray<ReadonlyArray<string>> = [
   ["libnss3"],
+  ["libcups2t64", "libcups2"],
+  ["libdrm2"],
+  ["libpango-1.0-0"],
+  ["libcairo2"],
   ["libglib2.0-0t64", "libglib2.0-0"],
   ["libatk1.0-0t64", "libatk1.0-0"],
   ["libatk-bridge2.0-0t64", "libatk-bridge2.0-0"],

@@ -16,7 +16,7 @@ describe("server browser element refs", () => {
   let cdp: CDPSession;
 
   beforeAll(async () => {
-    browser = await chromium.launch({ headless: true });
+    browser = await chromium.launch({ channel: "chromium", headless: true });
   });
   afterAll(async () => {
     await browser?.close();
@@ -278,6 +278,7 @@ describe("server browser snapshot screenshot", () => {
   beforeAll(async () => {
     // ServerBrowserContexts launches with these, and the capture scale depends on them.
     browser = await chromium.launch({
+      channel: "chromium",
       headless: true,
       args: ["--disable-gpu", "--force-device-scale-factor=2"],
     });
